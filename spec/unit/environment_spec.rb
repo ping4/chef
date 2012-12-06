@@ -2,6 +2,7 @@
 # Author:: Stephen Delano (<stephen@ospcode.com>)
 # Author:: Seth Falcon (<seth@ospcode.com>)
 # Author:: John Keiser (<jkeiser@ospcode.com>)
+# Author:: Kyle Goodwin (<kgoodwin@primerevenue.com>)
 # Copyright:: Copyright 2010-2011 Opscode, Inc.
 # License:: Apache License, Version 2.0
 #
@@ -235,6 +236,107 @@ describe Chef::Environment do
     end
   end
 
+  describe "when listing the available cookbooks filtered by policy" do
+    before(:each) do
+      @environment.name "prod"
+      @environment.cookbook_versions({
+        "apt" => "= 1.0.0",
+        "apache2" => "= 2.0.0"
+      })
+      Chef::Environment.stub!(:cdb_load).and_return @environment
+
+      @all_cookbooks = []
+      @all_cookbooks << begin
+        cv = Chef::CookbookVersion.new("apt")
+        cv.version = "1.0.0"
+        cv.recipe_filenames = ["default.rb", "only-in-1-0.rb"]
+        cv
+      end
+      @all_cookbooks << begin
+        cv = Chef::CookbookVersion.new("apt")
+        cv.version = "1.1.0"
+        cv.recipe_filenames = ["default.rb", "only-in-1-1.rb"]
+        cv
+      end
+      @all_cookbooks << begin
+        cv = Chef::CookbookVersion.new("apache2")
+        cv.version = "2.0.0"
+        cv.recipe_filenames = ["default.rb", "mod_ssl.rb"]
+        cv
+      end
+      @all_cookbooks << begin
+        cv = Chef::CookbookVersion.new("god")
+        cv.version = "4.2.0"
+        cv.recipe_filenames = ["default.rb"]
+        cv
+      end
+      Chef::CookbookVersion.stub!(:cdb_list).and_return @all_cookbooks
+    end
+
+    it "should load the environment" do
+      Chef::Environment.should_receive(:cdb_load).with("prod", nil)
+      Chef::Environment.cdb_load_filtered_cookbook_versions("prod")
+    end
+
+    it "should handle cookbooks with no available version" do
+      @environment.cookbook_versions({
+                                       "apt" => "> 999.0.0",
+                                       "apache2" => "= 2.0.0"
+                                     })
+      Chef::Environment.should_receive(:cdb_load).with("prod", nil)
+      recipes = Chef::Environment.cdb_load_filtered_recipe_list("prod")
+      # order doesn't matter
+      recipes.should =~ ["god", "apache2", "apache2::mod_ssl"]
+    end
+
+
+    it "should load all the cookbook versions" do
+      Chef::CookbookVersion.should_receive(:cdb_list)
+      Chef::Environment.cdb_load_filtered_cookbook_versions("prod")
+      recipes = Chef::Environment.cdb_load_filtered_recipe_list("prod")
+      recipes.should =~ ["apache2", "apache2::mod_ssl", "apt",
+                         "apt::only-in-1-0", "god"]
+    end
+
+    it "should load all the cookbook versions with no policy" do
+      @environment.cookbook_versions({})
+      Chef::CookbookVersion.should_receive(:cdb_list)
+      Chef::Environment.cdb_load_filtered_cookbook_versions("prod")
+      recipes = Chef::Environment.cdb_load_filtered_recipe_list("prod")
+      recipes.should =~ ["apache2", "apache2::mod_ssl", "apt",
+                         "apt::only-in-1-1", "god"]
+    end
+
+    it "should restrict the cookbook versions, as specified in the environment" do
+      res = Chef::Environment.cdb_load_filtered_cookbook_versions("prod")
+      res["apt"].detect {|cb| cb.version == "1.0.0"}.should_not == nil
+      res["apache2"].detect {|cb| cb.version == "2.0.0"}.should_not == nil
+      res["god"].detect {|cb| cb.version == "4.2.0"}.should_not == nil
+    end
+
+    it "should produce correct results, regardless of the cookbook order in couch" do
+      # a bug present before the environments feature defaulted to the last CookbookVersion
+      # object for a cookbook as returned from couchdb when fetching cookbooks for a node
+      # this is a regression test
+      @all_cookbooks << begin
+        cv = Chef::CookbookVersion.new("god")
+        cv.version = "0.0.1"
+        cv
+      end
+      res = Chef::Environment.cdb_load_filtered_cookbook_versions("prod")
+      res["apt"].detect {|cb| cb.version == "1.0.0"}.should_not == nil
+      res["apache2"].detect {|cb| cb.version == "2.0.0"}.should_not == nil
+      res["god"].detect {|cb| cb.version == "4.2.0"}.should_not == nil
+    end
+
+    it "should return all versions of a cookbook that meet the version requirement" do
+      @environment.cookbook "apt", ">= 1.0.0"
+      res = Chef::Environment.cdb_load_filtered_cookbook_versions("prod")
+      res["apt"].detect {|cb| cb.version == "1.0.0"}.should_not == nil
+      res["apt"].detect {|cb| cb.version == "1.1.0"}.should_not == nil
+    end
+  end
+
   describe "self.validate_cookbook_versions" do
     before(:each) do
       @cookbook_versions = {
@@ -355,6 +457,78 @@ describe Chef::Environment do
         @rest.should_receive(:get_rest).and_return({ "one" => "http://foo" })
         r = Chef::Environment.list
         r["one"].should == "http://foo"
+      end
+    end
+  end
+
+  describe "when loading" do
+    describe "in solo mode" do
+      before do
+        Chef::Config[:solo] = true
+        Chef::Config[:environment_path] = '/var/chef/environments'
+      end
+
+      after do
+        Chef::Config[:solo] = false
+      end
+
+      it "should get the environment from the environment_path" do
+        File.should_receive(:directory?).with(Chef::Config[:environment_path]).and_return(true)
+        File.should_receive(:exists?).with(File.join(Chef::Config[:environment_path], 'foo.json')).and_return(false)
+        File.should_receive(:exists?).with(File.join(Chef::Config[:environment_path], 'foo.rb')).exactly(2).times.and_return(true)
+        File.should_receive(:readable?).with(File.join(Chef::Config[:environment_path], 'foo.rb')).and_return(true)
+        ROLE_DSL=<<-EOR
+name "foo"
+EOR
+        IO.should_receive(:read).with(File.join(Chef::Config[:environment_path], 'foo.rb')).and_return(ROLE_DSL)
+        Chef::Environment.load('foo')
+      end
+
+      it "should return a Chef::Environment object from JSON" do
+        File.should_receive(:directory?).with(Chef::Config[:environment_path]).and_return(true)
+        File.should_receive(:exists?).with(File.join(Chef::Config[:environment_path], 'foo.json')).and_return(true)
+        IO.should_receive(:read).with(File.join(Chef::Config[:environment_path], 'foo.json')).and_return('{ "name": "foo", "default_attributes": { "foo": { "bar": "1" } }, "json_class": "Chef::Environment", "description": "desc", "chef_type": "environment" }')
+        environment = Chef::Environment.load('foo')
+
+        environment.should be_a_kind_of(Chef::Environment)
+        environment.name.should == 'foo'
+        environment.description.should == 'desc'
+        environment.default_attributes.should == {'foo' => {'bar' => '1'}}
+      end
+
+      it "should return a Chef::Environment object from Ruby DSL" do
+        File.should_receive(:directory?).with(Chef::Config[:environment_path]).and_return(true)
+        File.should_receive(:exists?).with(File.join(Chef::Config[:environment_path], 'foo.json')).and_return(false)
+        File.should_receive(:exists?).with(File.join(Chef::Config[:environment_path], 'foo.rb')).exactly(2).times.and_return(true)
+        File.should_receive(:readable?).with(File.join(Chef::Config[:environment_path], 'foo.rb')).and_return(true)
+        ROLE_DSL=<<-EOR
+name "foo"
+description "desc"
+EOR
+        IO.should_receive(:read).with(File.join(Chef::Config[:environment_path], 'foo.rb')).and_return(ROLE_DSL)
+        environment = Chef::Environment.load('foo')
+
+        environment.should be_a_kind_of(Chef::Environment)
+        environment.name.should == 'foo'
+        environment.description.should == 'desc'
+      end
+
+      it 'should raise an error if the configured environment_path is invalid' do
+        File.should_receive(:directory?).with(Chef::Config[:environment_path]).and_return(false)
+
+        lambda {
+          Chef::Environment.load('foo')
+        }.should raise_error Chef::Exceptions::InvalidEnvironmentPath, "Environment path '/var/chef/environments' is invalid"
+      end
+
+      it 'should raise an error if the file does not exist' do
+        File.should_receive(:directory?).with(Chef::Config[:environment_path]).and_return(true)
+        File.should_receive(:exists?).with(File.join(Chef::Config[:environment_path], 'foo.json')).and_return(false)
+        File.should_receive(:exists?).with(File.join(Chef::Config[:environment_path], 'foo.rb')).and_return(false)
+
+        lambda {
+          Chef::Environment.load('foo')
+        }.should raise_error Chef::Exceptions::EnvironmentNotFound, "Environment 'foo' could not be loaded from disk"
       end
     end
   end

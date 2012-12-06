@@ -1,6 +1,7 @@
 #
 # Author:: Adam Jacob (<adam@opscode.com>)
 # Author:: Seth Falcon (<seth@opscode.com>)
+# Author:: Kyle Goodwin (<kgoodwin@primerevenue.com>)
 # Copyright:: Copyright 2008-2010 Opscode, Inc.
 # License:: Apache License, Version 2.0
 #
@@ -127,6 +128,9 @@ class Chef
     # attributes are updated. Attempting to read from a stale copy
     # of merged attributes will trigger this error.
     class StaleAttributeRead < StandardError; end
+
+    class InvalidEnvironmentPath < ArgumentError; end
+    class EnvironmentNotFound < RuntimeError; end
 
     class MissingRole < RuntimeError
       NULL = Object.new
