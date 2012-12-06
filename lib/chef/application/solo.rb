@@ -129,6 +129,11 @@ class Chef::Application::Solo < Chef::Application
       :description => "Pull down a remote gzipped tarball of recipes and untar it to the cookbook cache.",
       :proc => nil
 
+  option :environment,
+    :short        => '-E ENVIRONMENT',
+    :long         => '--environment ENVIRONMENT',
+    :description  => 'Set the Chef Environment on the node'
+
   option :version,
     :short        => "-v",
     :long         => "--version",
